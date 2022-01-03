@@ -1,0 +1,414 @@
+---
+title: "COVID-19 Dashboard"
+
+output: 
+  flexdashboard::flex_dashboard:
+    orientation: rows
+    vertical_layout: fill
+---
+
+```{r setup, include=FALSE}
+library(flexdashboard)
+library(shiny)
+library(tidyverse)
+library(plotly)
+if(!require(rnaturalearthhires)){
+    devtools::install_github("ropensci/rnaturalearthhires")
+    library(rnaturalearthhires)
+}
+
+df1 <- vroom::vroom("https://raw.githubusercontent.com/RamiKrispin/coronavirus/master/csv/coronavirus.csv")
+df2 <- vroom::vroom('https://covid.ourworldindata.org/data/owid-covid-data.csv')
+
+# df2
+country_tbl <- df2 %>% 
+  select(location, date, total_cases, new_cases,new_cases_smoothed,population,
+         total_deaths, new_deaths, reproduction_rate,
+         people_vaccinated, people_vaccinated_per_hundred, new_vaccinations) 
+
+
+summary_7_tbl <- country_tbl %>% 
+  filter(date %>% between(max(date)-6, max(date))) %>% 
+  group_by(location) %>% 
+  summarise(
+    confirmed_tot = sum(new_cases, na.rm = T),
+    death_tot = sum(new_deaths, na.rm = T)) %>%
+  ungroup()
+
+
+treemap_tbl <- country_tbl %>% filter(date == max(date)) %>% 
+  select(location, total_cases, total_deaths, people_vaccinated) %>% 
+  gather(key = "quantity", value = "value", -location) %>% 
+  left_join(
+    country_tbl %>% filter(date == max(date)) %>% 
+      select(location, people_vaccinated_per_hundred) %>% 
+      inner_join(summary_7_tbl %>% select(location, confirmed_tot, death_tot), by="location") %>% 
+      rename(people_vaccinated = people_vaccinated_per_hundred,
+             total_cases = confirmed_tot,
+             total_deaths = death_tot) %>% 
+      gather(key='quantity', value = 'intensity', -location),
+    by = c('location', 'quantity')
+  ) %>% 
+  filter(!location %in% c('World', 'Africa','Asia', 'Europe', 'European Union','Lower middle income','Low income',
+                          'North America','South America','High income','Upper middle income')) %>% 
+  mutate(quantity = case_when(quantity == 'total_cases' ~ 'Total cases',
+                              quantity == 'total_deaths' ~ 'Total deaths',
+                              TRUE ~ 'Total people vaccinated'))
+
+
+# countries with province-level data ----
+country_province_tbl <- df1 %>% #filter(country %in% (df1 %>% filter(!is.na(province)) %>% distinct(country) %>% pull())) %>% 
+  filter(!is.na(province)& !province %in% c('Unknown', 'Diamond Princess', 'Grand Princess')) %>% 
+  mutate(province = ifelse(province == 'Quebec', 'Québec', province)) %>% 
+  group_by(province, type) %>% 
+  mutate(cumulative_inc = cumsum(cases)) %>% 
+  ungroup() %>% 
+  filter(country %in% c('Canada', 'China', 'Australia'))
+
+# country_province_tbl <- country_province_tbl %>% 
+#   filter(date %>% between(max(date)-6, max(date))) %>% 
+#   group_by(province, type) %>% 
+#   summarise(cumulative_inc_7 = sum(cases)) %>% 
+#   ungroup() %>% 
+#   left_join(country_province_tbl %>% filter(date==max(date)), by = c("province", "type"))
+
+map_points <- sf::st_as_sf(country_province_tbl %>%filter(!province %in% c('Repatriated Travellers', 'Unknown')) %>%  distinct(province, lat, long), coords = c("long", "lat"))
+sf::st_crs(map_points) <- "+proj=longlat +ellps=WGS84 +datum=WGS84 +no_defs +towgs84=0,0,0"
+map_points <- map_points %>% left_join(country_province_tbl %>% 
+  filter(date %>% between(max(date)-6, max(date))) %>% 
+  group_by(country, province, type) %>% 
+  summarise(cumulative_inc_7 = sum(cases)) %>% 
+  ungroup(), by='province')
+
+confirmed_color <- "purple"
+active_color <- "#e5383b"
+recovered_color <- "green"
+death_color <- "#e5383b"
+vaccinated_color <- "forestgreen"
+reproduction_color <- "#1f77b4"
+env <- "master"
+```
+
+
+
+Country Summary
+=======================================================================
+
+
+### Inputs {.sidebar}
+-----------------------------------------------------------------------
+
+```{r}
+selectInput("country", label = h3("Country"), 
+    choices = df2 %>% distinct(location), 
+    selected = "World", 
+    multiple=FALSE)
+
+selectInput("time", label = h3("Time period"), 
+    choices = c("All time", "Last 7 days"), 
+    selected = "All time", 
+    multiple=FALSE)
+#radioButtons("smoothing",label = h3("Smoothing"), choices = c("3-day SMA", "7-day SMA"), selected = "3-day SMA")
+```
+
+
+Row {data-height=150}
+-----------------------------------------------------------------------
+### confirmed {.value-box}
+  
+```{r}
+
+renderValueBox({
+  if (input$time == 'All time'){
+    confirmed_total <- country_tbl %>% filter(location == input$country) %>% tail(1) %>% pull(total_cases) %>% scales::comma()
+  } else {
+    confirmed_total <- summary_7_tbl %>% filter(location == input$country) %>% pull(confirmed_tot) %>% scales::comma()
+  }
+  
+  valueBox(value = confirmed_total, 
+         caption = "Total Confirmed Cases", 
+         icon = "fas fa-user-md", 
+         color = confirmed_color)})
+```
+
+
+### death {.value-box}
+  
+```{r}
+
+renderValueBox({
+  if (input$time == 'All time'){
+    death_total <- country_tbl %>% filter(location == input$country) %>% tail(1) %>% pull(total_deaths) %>% scales::comma()
+  } else {
+    death_total <- summary_7_tbl %>% filter(location == input$country) %>% pull(death_tot) %>% scales::comma()
+  }
+  valueBox(value = death_total, 
+         caption = "Deaths", 
+         icon = "fas fa-heart-broken", 
+         color = death_color)})
+```
+
+
+
+
+### reproduction {.value-box}
+  
+```{r}
+
+renderValueBox({
+  R_t <- country_tbl %>% filter(location == input$country) %>% filter(!is.na(reproduction_rate)) %>% tail(1) %>% pull(reproduction_rate)
+  valueBox(value = R_t, 
+         caption = "Effective Reproduction Number", 
+         icon = "far fa-plus-square", 
+         color = reproduction_color)})
+```
+
+### vaccinated {.value-box}
+  
+```{r}
+
+renderValueBox({
+  vaccinated_total <- country_tbl %>% filter(location == input$country) %>% tail(1) %>% pull(people_vaccinated) %>% scales::comma()
+  valueBox(value = vaccinated_total, 
+         caption = "People vaccinated",
+         icon = "fas fa-syringe",
+         color = vaccinated_color)})
+```
+
+Row {data-height=450}
+-----------------------------------------------------------------------
+
+
+### Daily New Cases
+
+```{r}
+renderPlotly({
+  plot_ly(
+    data = country_tbl %>%
+      filter(location == input$country),
+    x = ~ date,
+    y = ~ new_cases,
+    type = 'scatter',
+    mode = 'markers',
+    name = "Observed Daily New Cases"
+  ) %>%
+    add_lines(x = ~ date,
+              y = ~ new_cases_smoothed,
+              name = "Trend line"
+    ) %>%
+    layout(
+      title = "",
+      legend = list(x = 0.03, y = 0.95),
+      yaxis = list(title = 'Number of Cases'),
+      xaxis = list(title = 'Date'),
+      hovermode = "compare"
+    )
+})
+```
+
+Row {data-height=450}
+-----------------------------------------------------------------------
+### Daily New Deaths
+
+```{r}
+renderPlotly({
+
+  plot_ly(
+    data = country_tbl %>%
+        filter(location == input$country),
+    x = ~ date,
+    y = ~ new_deaths,
+    type = 'scatter',
+    mode = 'lines',
+    line = list(color = death_color)
+  ) %>%
+    
+    layout(
+      title = "",
+      yaxis = list(title = 'Number of Deaths'),
+      xaxis = list(title = 'Date'),
+      hovermode = "x unified"
+    )
+})
+
+```
+
+
+### Daily New Vaccinations
+
+```{r}
+renderPlotly({
+
+  plot_ly(
+    data = country_tbl %>%
+        filter(location == input$country),
+    x = ~ date,
+    y = ~ new_vaccinations,
+    type = 'scatter',
+    mode = 'lines',
+    line = list(color = vaccinated_color)
+  ) %>%
+    layout(
+      title = "",
+      yaxis = list(title = 'Number of Vaccinations'),
+      xaxis = list(title = 'Date'),
+      hovermode = "x unified"
+    )
+})
+
+```
+
+
+Worldwide Summary
+=======================================================================
+Row {data-height=150}
+-----------------------------------------------------------------------
+### confirmed {.value-box}
+  
+```{r}
+
+renderValueBox({
+  confirmed_total <- country_tbl %>% filter(location == 'World') %>% tail(1) %>% pull(total_cases) %>% scales::comma()
+
+  valueBox(value = confirmed_total, 
+         caption = "Total Confirmed Cases", 
+         icon = "fas fa-user-md", 
+         color = confirmed_color)})
+```
+
+
+### death {.value-box}
+  
+```{r}
+
+renderValueBox({
+  death_total <- country_tbl %>% filter(location == 'World') %>% tail(1) %>% pull(total_deaths) %>% scales::comma()
+  
+  valueBox(value = death_total, 
+         caption = "Deaths", 
+         icon = "fas fa-heart-broken", 
+         color = death_color)})
+```
+
+
+### vaccinated {.value-box}
+  
+```{r}
+
+renderValueBox({
+  vaccinated_total <- country_tbl %>% filter(location == 'World') %>% tail(1) %>% pull(people_vaccinated) %>% scales::comma()
+  valueBox(value = vaccinated_total, 
+         caption = "People vaccinated",
+         icon = "fas fa-syringe",
+         color = vaccinated_color)})
+```
+
+Row {data-height=650}
+-----------------------------------------------------------------------
+### Distribution by Country
+```{r}
+plot_ly(
+  data = treemap_tbl %>% filter(quantity == "Total cases"),
+  type= "treemap",
+  values = ~value,
+  labels= ~location,
+  parents=  ~quantity,
+  marker = list(colorscale = 'Reds'),
+  domain = list(column=0),
+  textinfo="label+value+percent parent", 
+  hoverinfo="label+value+percent parent"
+) %>%
+  add_trace(
+    data = treemap_tbl %>% filter(quantity == "Total deaths"),
+    type= "treemap",
+    values = ~value,
+    labels= ~location,
+    parents=  ~quantity,
+    marker = list(colorscale = 'Reds'),
+    domain = list(column=1),
+    textinfo="label+value+percent parent", 
+    hoverinfo="label+value+percent parent"
+  ) %>%
+  add_trace(
+    data = treemap_tbl %>% filter(quantity == "Total people vaccinated"),
+    type= "treemap",
+    values = ~value,
+    labels= ~location,
+    parents=  ~quantity,
+    marker = list(colorscale = 'Greens', reversescale=T),
+    domain = list(column=2),
+    textinfo="label+value+percent parent", 
+    hoverinfo="label+value+percent parent"
+  )%>%
+  layout(grid=list(columns=3, rows=1))
+
+```
+
+Regional-level Summary of Country
+=======================================================================
+
+
+### Inputs {.sidebar}
+-----------------------------------------------------------------------
+
+```{r}
+selectInput("country2", label = h3("Country"), 
+    choices = country_province_tbl %>% distinct(country), 
+    selected = "Canada", 
+    multiple=FALSE)
+
+```
+
+Row
+-----------------------------------------------------------------------
+### Total number of cases by region
+```{r}
+map_region <- reactive({
+  rnaturalearth::ne_states(country = input$country2, returnclass = "sf") %>%
+    select(province = name, region, geometry) %>%
+    left_join(country_province_tbl %>%
+                filter(country == input$country2) %>% 
+                filter(date == max(date)), 
+              by = "province") %>%
+    mutate(lab= str_c(province, cumulative_inc, sep=', '))
+})
+
+
+
+leaflet::renderLeaflet({
+  
+  fig <- map_region() %>%
+    dplyr::filter(type == 'confirmed') %>%
+    mapview::mapview(zcol = "cumulative_inc", label="lab", layer.name="Total cases") +
+    
+    map_points%>% 
+    filter(country==input$country2,type == 'confirmed') %>% 
+    mutate(lab= str_c(province, cumulative_inc_7, sep=', ')) %>% 
+    mutate(Cases_last_7_days = cumulative_inc_7/1000) %>% 
+    mapview::mapview(cex="Cases_last_7_days",label="lab", layer.name = "Total cases last 7 days",  col.regions="red")
+  fig@map
+})
+
+
+```
+
+### Total number of deaths by region
+```{r}
+
+leaflet::renderLeaflet({
+  fig <- map_region() %>%
+    filter(type == 'death') %>% 
+    rename(Total_deaths = cumulative_inc) %>% 
+    mapview::mapview(zcol = "Total_deaths", label="lab", layer.name="Total deaths") +
+    
+    map_points%>% 
+    filter(country==input$country2, type == 'death') %>% 
+    mutate(lab= str_c(province, cumulative_inc_7, sep=', ')) %>% 
+    mutate(deaths_last_7_days = cumulative_inc_7/1000) %>% 
+    mapview::mapview(cex="deaths_last_7_days",label="lab", layer.name = "Total deaths last 7 days",  col.regions="red")
+  fig@map
+})
+
+
+```
+```
