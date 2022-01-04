@@ -6,3 +6,7 @@ Packages used:
 + Dashboard: flexdashboard, shiny
 + Data wrangling: dplyr, scales, string_r, sf (for spatial data)
 + Visualization: plotly, mapview
+
+Data sources:
++ https://raw.githubusercontent.com/RamiKrispin/coronavirus/master/csv/coronavirus.csv
++ https://covid.ourworldindata.org/data/owid-covid-data.csv
