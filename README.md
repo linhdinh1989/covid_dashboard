@@ -1,6 +1,6 @@
 This dashboard is deployed at https://ldinh.shinyapps.io/covid_dashboard/
 
-Code to generate dashboard is in covid_app.R
+Code to generate dashboard is in covid_app.Rmd
 
 Packages used: 
 + Dashboard: flexdashboard, shiny
